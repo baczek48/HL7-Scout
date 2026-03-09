@@ -1,7 +1,7 @@
 # Copyright © 2026 Sebastian Bąk. All rights reserved.
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTextEdit, QLineEdit, QScrollArea, QPushButton,
     QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel,
@@ -105,23 +105,41 @@ class SegmentTile(QFrame):
 
 # ──────────────────────────────────────── Main window ────────────────────────
 
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("HL7 Scout")
-        self.setMinimumSize(1100, 700)
-        self.resize(1300, 800)
+class MainWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self._current_message = None
         self._segment_tiles: list[SegmentTile] = []
         self._setup_ui()
         self._connect_signals()
 
+    def load_hl7(self, raw: str):
+        """Load an HL7 message programmatically (called from DB panel)."""
+        raw = raw.strip()
+        if not raw:
+            return
+        try:
+            msg = hl7_parser.parse(raw)
+        except Exception as e:
+            self._set_status(f"Błąd parsowania: {e}", error=True)
+            return
+        if not msg.segments:
+            self._set_status("Nie wykryto segmentów w treści HL7.", error=True)
+            return
+        self._current_message = msg
+        self._show_tiles(msg)
+        self._populate_tree(msg)
+        self._populate_table(msg)
+        count = len(msg.segments)
+        self._set_status(
+            f"Załadowano z bazy: {count} segment"
+            f"{'y' if 2 <= count <= 4 else 'ów' if count != 1 else ''}."
+        )
+
     # ──────────────────────────────────────── UI setup ───────────────────────
 
     def _setup_ui(self):
-        root = QWidget()
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 

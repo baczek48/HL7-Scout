@@ -5,11 +5,12 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget, QSizePolicy
 from PyQt6.QtGui import QPalette, QColor, QIcon, QPixmap, QPainter, QPainterPath, QPen
 from PyQt6.QtCore import Qt, QRectF
 
 from ui.main_window import MainWindow
+from ui.db_panel import DbPanel
 
 
 def apply_dark_theme(app: QApplication):
@@ -71,15 +72,82 @@ def make_icon() -> QIcon:
     p.setPen(pen)
     p.drawPath(hex_path)
 
+    # Clip text to hexagon so it can't overflow on any system font
+    p.setClipPath(hex_path)
+
     # "HL7" text
     from PyQt6.QtGui import QFont
-    font = QFont("Arial", int(size * 0.22), QFont.Weight.Bold)
+    font = QFont("Arial", int(size * 0.20), QFont.Weight.Bold)
     p.setFont(font)
     p.setPen(QColor(255, 255, 255))
-    p.drawText(QRectF(0, size * 0.25, size, size * 0.5), Qt.AlignmentFlag.AlignCenter, "HL7")
+    p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "HL7")
 
     p.end()
     return QIcon(px)
+
+
+class AppWindow(QMainWindow):
+    """Top-level window with Parser and DB tabs."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("HL7 Scout")
+        self.setMinimumSize(1100, 700)
+        self.resize(1300, 800)
+
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.tabBar().setExpanding(False)
+        tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: #0d1117;
+            }
+            QTabWidget::tab-bar {
+                left: 0px;
+            }
+            QTabBar {
+                background: #161b22;
+                border-bottom: 1px solid #21262d;
+            }
+            QTabBar::tab {
+                background: transparent;
+                color: #8b949e;
+                padding: 9px 16px 7px 16px;
+                font-size: 12px;
+                font-weight: 500;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }
+            QTabBar::tab:selected {
+                color: #e6edf3;
+                border-bottom: 2px solid #1f6feb;
+                font-weight: 600;
+            }
+            QTabBar::tab:hover:!selected {
+                color: #c9d1d9;
+                background: rgba(255,255,255,0.04);
+            }
+            QTabBar::tab:first {
+                margin-left: 8px;
+            }
+        """)
+
+        # Parser tab
+        self._parser = MainWindow()
+        tabs.addTab(self._parser, "Parser HL7")
+
+        # DB tab
+        self._db_panel = DbPanel()
+        self._db_panel.open_in_parser.connect(self._open_in_parser)
+        tabs.addTab(self._db_panel, "Baza danych")
+
+        self.setCentralWidget(tabs)
+        self._tabs = tabs
+
+    def _open_in_parser(self, raw: str):
+        self._tabs.setCurrentIndex(0)
+        self._parser.load_hl7(raw)
 
 
 def main():
@@ -89,7 +157,7 @@ def main():
     apply_dark_theme(app)
     app.setWindowIcon(make_icon())
 
-    window = MainWindow()
+    window = AppWindow()
     window.show()
     sys.exit(app.exec())
 
