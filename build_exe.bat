@@ -1,13 +1,14 @@
 @echo off
-echo Instalowanie PyInstaller...
-pip install pyinstaller --quiet
+echo Instalowanie zaleznosci...
+pip install pyinstaller oracledb cryptography --quiet
 
 echo.
-echo Budowanie HL7Scout.exe...
-pyinstaller --onefile --windowed ^
-    --name "HL7Scout" ^
-    --add-data "ui;ui" ^
-    main.py
+echo Generowanie ikony...
+python generate_icon.py
+
+echo.
+echo Budowanie HL7Scout.exe (ze spec)...
+pyinstaller HL7Scout.spec --noconfirm
 
 echo.
 if not exist "dist\HL7Scout.exe" (
