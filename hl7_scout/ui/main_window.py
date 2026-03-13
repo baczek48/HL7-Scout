@@ -1,19 +1,162 @@
 # Copyright © 2026 Sebastian Bąk. All rights reserved.
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTextEdit, QLineEdit, QScrollArea, QPushButton,
     QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel,
     QGroupBox, QTabWidget, QFrame, QApplication, QMenu,
+    QSpinBox,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPointF, QRectF
 from PyQt6.QtGui import (
     QColor, QFont, QBrush, QKeySequence, QShortcut,
+    QIcon, QPixmap, QPainter, QPen, QPainterPath, QPolygonF,
 )
 
 import parser as hl7_parser
 import hl7_fields as fields
+import mllp_sender
+
+
+# ──────────────────────────────────────── Button icons (QPainter) ─────────────
+
+def _make_btn_icon(draw_fn, size: int = 32,
+                   color: str = "#ffffff", bg: str | None = None) -> QIcon:
+    """Create a crisp QIcon by painting with QPainter."""
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if bg:
+        p.fillRect(0, 0, size, size, QColor(bg))
+    draw_fn(p, size, QColor(color))
+    p.end()
+    return QIcon(px)
+
+
+def _draw_play(p: QPainter, s: int, c: QColor):
+    """Solid play triangle."""
+    m = s * 0.22
+    path = QPainterPath()
+    path.moveTo(m + s * 0.08, m)
+    path.lineTo(s - m, s / 2)
+    path.lineTo(m + s * 0.08, s - m)
+    path.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    p.drawPath(path)
+
+
+def _draw_copy(p: QPainter, s: int, c: QColor):
+    """Two overlapping rounded rectangles — copy icon."""
+    pen = QPen(c, s * 0.07)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    off = s * 0.12
+    w = s * 0.52
+    # Back sheet
+    p.drawRoundedRect(QRectF(off, off, w, w * 1.15), s * 0.06, s * 0.06)
+    # Front sheet
+    p.drawRoundedRect(QRectF(s - off - w, s - off - w * 1.15, w, w * 1.15),
+                      s * 0.06, s * 0.06)
+
+
+def _draw_chevron_right(p: QPainter, s: int, c: QColor):
+    """Right-pointing chevron >."""
+    pen = QPen(c, s * 0.1)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    m = s * 0.32
+    p.drawPolyline(QPolygonF([
+        QPointF(m, s * 0.2),
+        QPointF(s - m, s * 0.5),
+        QPointF(m, s * 0.8),
+    ]))
+
+
+def _draw_chevron_down(p: QPainter, s: int, c: QColor):
+    """Down-pointing chevron v."""
+    pen = QPen(c, s * 0.1)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    m = s * 0.25
+    p.drawPolyline(QPolygonF([
+        QPointF(s * 0.2, m),
+        QPointF(s * 0.5, s - m),
+        QPointF(s * 0.8, m),
+    ]))
+
+
+def _draw_send(p: QPainter, s: int, c: QColor):
+    """Paper-plane / send arrow."""
+    path = QPainterPath()
+    m = s * 0.15
+    path.moveTo(m, s * 0.5)
+    path.lineTo(s - m, s * 0.5)
+    p.setPen(QPen(c, s * 0.08, cap=Qt.PenCapStyle.RoundCap))
+    p.drawPath(path)
+    # Arrowhead
+    arrow = QPainterPath()
+    arrow.moveTo(s * 0.58, s * 0.25)
+    arrow.lineTo(s - m, s * 0.5)
+    arrow.lineTo(s * 0.58, s * 0.75)
+    pen = QPen(c, s * 0.08)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.drawPath(arrow)
+
+
+def _draw_clear(p: QPainter, s: int, c: QColor):
+    """X mark — clear."""
+    pen = QPen(c, s * 0.09)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    m = s * 0.26
+    p.drawLine(QPointF(m, m), QPointF(s - m, s - m))
+    p.drawLine(QPointF(s - m, m), QPointF(m, s - m))
+
+
+# Pre-built icons (created lazily on first use)
+_icon_cache: dict[str, QIcon] = {}
+
+
+def _icon(name: str) -> QIcon:
+    if name not in _icon_cache:
+        builders = {
+            "play":      lambda: _make_btn_icon(_draw_play, color="#ffffff"),
+            "copy":      lambda: _make_btn_icon(_draw_copy, color="#aaccdd"),
+            "copy_seg":  lambda: _make_btn_icon(_draw_copy, size=26, color="#aaaacc"),
+            "mllp_r":    lambda: _make_btn_icon(_draw_chevron_right, color="#7799bb"),
+            "mllp_d":    lambda: _make_btn_icon(_draw_chevron_down, color="#7799bb"),
+            "send":      lambda: _make_btn_icon(_draw_send, color="#ffffff"),
+            "clear":     lambda: _make_btn_icon(_draw_clear, color="#aaaaaa"),
+        }
+        _icon_cache[name] = builders[name]()
+    return _icon_cache[name]
+
+
+# ──────────────────────────────────────── MLLP worker thread ─────────────────
+
+class _MLLPWorker(QThread):
+    """Sends an HL7 message via MLLP in a background thread."""
+    finished = pyqtSignal(object)  # MLLPResponse
+
+    def __init__(self, host: str, port: int, message: str, timeout: float):
+        super().__init__()
+        self._host = host
+        self._port = port
+        self._message = message
+        self._timeout = timeout
+
+    def run(self):
+        result = mllp_sender.send(self._host, self._port,
+                                  self._message, self._timeout)
+        self.finished.emit(result)
 
 
 def _lighten(hex_color: str, amount: float = 0.18) -> str:
@@ -73,20 +216,22 @@ class SegmentTile(QFrame):
         # Editable segment content
         self.edit = QLineEdit(seg_raw)
         self.edit.setFont(QFont("Consolas", 9))
+        self.edit.setCursorPosition(0)  # always show from left, even for long segments
         self.edit.setStyleSheet(
             "QLineEdit { background: transparent; border: none; "
             "color: #d0d8e8; selection-background-color: #4a6a9a; }"
         )
 
         # Copy button
-        copy_btn = QPushButton("⎘")
+        copy_btn = QPushButton()
+        copy_btn.setIcon(_icon("copy_seg"))
         copy_btn.setFixedSize(26, 26)
         copy_btn.setToolTip("Kopiuj segment do schowka")
         copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn.setStyleSheet(
             "QPushButton { background: rgba(255,255,255,0.10); border: none; "
-            "border-radius: 3px; color: #aaaacc; font-size: 14px; }"
-            "QPushButton:hover { background: rgba(255,255,255,0.30); color: white; }"
+            "border-radius: 3px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.30); }"
             "QPushButton:pressed { background: rgba(255,255,255,0.15); }"
         )
         copy_btn.clicked.connect(self._copy)
@@ -105,41 +250,24 @@ class SegmentTile(QFrame):
 
 # ──────────────────────────────────────── Main window ────────────────────────
 
-class MainWindow(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("HL7 Scout")
+        self.setMinimumSize(1100, 700)
+        self.resize(1300, 800)
         self._current_message = None
         self._segment_tiles: list[SegmentTile] = []
+        self._mllp_worker: _MLLPWorker | None = None
         self._setup_ui()
         self._connect_signals()
-
-    def load_hl7(self, raw: str):
-        """Load an HL7 message programmatically (called from DB panel)."""
-        raw = raw.strip()
-        if not raw:
-            return
-        try:
-            msg = hl7_parser.parse(raw)
-        except Exception as e:
-            self._set_status(f"Błąd parsowania: {e}", error=True)
-            return
-        if not msg.segments:
-            self._set_status("Nie wykryto segmentów w treści HL7.", error=True)
-            return
-        self._current_message = msg
-        self._show_tiles(msg)
-        self._populate_tree(msg)
-        self._populate_table(msg)
-        count = len(msg.segments)
-        self._set_status(
-            f"Załadowano z bazy: {count} segment"
-            f"{'y' if 2 <= count <= 4 else 'ów' if count != 1 else ''}."
-        )
 
     # ──────────────────────────────────────── UI setup ───────────────────────
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        root = QWidget()
+        self.setCentralWidget(root)
+        layout = QVBoxLayout(root)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
@@ -197,7 +325,8 @@ class MainWindow(QWidget):
         # ── Button row ───────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
 
-        self.parse_btn = QPushButton("Parsuj  ▶")
+        self.parse_btn = QPushButton("  Parsuj")
+        self.parse_btn.setIcon(_icon("play"))
         self.parse_btn.setFixedWidth(120)
         self.parse_btn.setStyleSheet(
             "QPushButton { background: #0078d7; color: white; border-radius: 4px; "
@@ -206,7 +335,8 @@ class MainWindow(QWidget):
             "QPushButton:pressed { background: #005fa3; }"
         )
 
-        self.copy_frame_btn = QPushButton("Kopiuj ramkę  ⎘")
+        self.copy_frame_btn = QPushButton("  Kopiuj ramke")
+        self.copy_frame_btn.setIcon(_icon("copy"))
         self.copy_frame_btn.setFixedWidth(152)
         self.copy_frame_btn.setToolTip("Kopiuj całą wiadomość HL7 do schowka (z separatorem \\r)")
         self.copy_frame_btn.setStyleSheet(
@@ -215,8 +345,9 @@ class MainWindow(QWidget):
             "QPushButton:pressed { background: #0a2a3a; }"
         )
 
-        self.clear_btn = QPushButton("Wyczyść")
-        self.clear_btn.setFixedWidth(100)
+        self.clear_btn = QPushButton("  Wyczysc")
+        self.clear_btn.setIcon(_icon("clear"))
+        self.clear_btn.setFixedWidth(110)
         self.clear_btn.setStyleSheet(
             "QPushButton { background: #3a3a4a; color: #aaa; border-radius: 4px; padding: 5px 10px; }"
             "QPushButton:hover { background: #4a4a5a; }"
@@ -225,16 +356,124 @@ class MainWindow(QWidget):
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888; font-size: 11px;")
 
+        self.mllp_toggle_btn = QPushButton("  MLLP")
+        self.mllp_toggle_btn.setIcon(_icon("mllp_r"))
+        self.mllp_toggle_btn.setFixedWidth(100)
+        self.mllp_toggle_btn.setToolTip("Pokaż / ukryj panel wysyłki MLLP")
+        self.mllp_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mllp_toggle_btn.setStyleSheet(
+            "QPushButton { background: #2a2a3a; color: #7799bb; border-radius: 4px; "
+            "padding: 5px 10px; font-weight: bold; }"
+            "QPushButton:hover { background: #3a3a4a; color: #99bbdd; }"
+            "QPushButton:pressed { background: #1a1a2a; }"
+        )
+
         btn_row.addWidget(self.parse_btn)
         btn_row.addWidget(self.copy_frame_btn)
         btn_row.addWidget(self.clear_btn)
+        btn_row.addWidget(self.mllp_toggle_btn)
         btn_row.addWidget(self.status_label)
         btn_row.addStretch()
+
+        # ── MLLP send panel (hidden by default) ─────────────────────────────
+        self.send_frame = QFrame()
+        send_frame = self.send_frame
+        send_frame.setObjectName("sendFrame")
+        send_frame.setStyleSheet(
+            "#sendFrame { background: #1a1a28; border: 1px solid #2a3a4a; border-radius: 4px; }"
+        )
+        send_layout = QVBoxLayout(send_frame)
+        send_layout.setContentsMargins(8, 6, 8, 6)
+        send_layout.setSpacing(4)
+
+        send_header = QLabel("Wyślij MLLP — transmisja HL7 na bramkę wymiany:")
+        send_header.setStyleSheet("color: #7799bb; font-size: 11px; border: none;")
+
+        send_row = QHBoxLayout()
+        send_row.setSpacing(6)
+
+        host_label = QLabel("Host:")
+        host_label.setStyleSheet("color: #8888aa; font-size: 11px; border: none;")
+        self.host_input = QLineEdit("localhost")
+        self.host_input.setFixedWidth(160)
+        self.host_input.setFont(QFont("Consolas", 9))
+        self.host_input.setStyleSheet(
+            "QLineEdit { background: #12121c; border: 1px solid #3a3a5a; border-radius: 3px; "
+            "color: #ccc; padding: 3px 6px; }"
+        )
+
+        port_label = QLabel("Port:")
+        port_label.setStyleSheet("color: #8888aa; font-size: 11px; border: none;")
+        self.port_input = QSpinBox()
+        self.port_input.setRange(1, 65535)
+        self.port_input.setValue(2575)  # default MLLP port
+        self.port_input.setFixedWidth(80)
+        self.port_input.setFont(QFont("Consolas", 9))
+        self.port_input.setStyleSheet(
+            "QSpinBox { background: #12121c; border: 1px solid #3a3a5a; border-radius: 3px; "
+            "color: #ccc; padding: 3px 6px; }"
+        )
+
+        timeout_label = QLabel("Timeout:")
+        timeout_label.setStyleSheet("color: #8888aa; font-size: 11px; border: none;")
+        self.timeout_input = QSpinBox()
+        self.timeout_input.setRange(1, 120)
+        self.timeout_input.setValue(10)
+        self.timeout_input.setSuffix("s")
+        self.timeout_input.setFixedWidth(70)
+        self.timeout_input.setFont(QFont("Consolas", 9))
+        self.timeout_input.setStyleSheet(
+            "QSpinBox { background: #12121c; border: 1px solid #3a3a5a; border-radius: 3px; "
+            "color: #ccc; padding: 3px 6px; }"
+        )
+
+        self.send_btn = QPushButton("  Wyslij")
+        self.send_btn.setIcon(_icon("send"))
+        self.send_btn.setFixedWidth(120)
+        self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_btn.setStyleSheet(
+            "QPushButton { background: #1a6a3a; color: white; border-radius: 4px; "
+            "padding: 5px 14px; font-weight: bold; }"
+            "QPushButton:hover { background: #22884a; }"
+            "QPushButton:pressed { background: #0e5528; }"
+            "QPushButton:disabled { background: #2a2a3a; color: #555; }"
+        )
+
+        self.send_status = QLabel("")
+        self.send_status.setStyleSheet("color: #888; font-size: 11px; border: none;")
+
+        send_row.addWidget(host_label)
+        send_row.addWidget(self.host_input)
+        send_row.addWidget(port_label)
+        send_row.addWidget(self.port_input)
+        send_row.addWidget(timeout_label)
+        send_row.addWidget(self.timeout_input)
+        send_row.addWidget(self.send_btn)
+        send_row.addWidget(self.send_status)
+        send_row.addStretch()
+
+        # Response display
+        self.response_display = QTextEdit()
+        self.response_display.setReadOnly(True)
+        self.response_display.setFixedHeight(60)
+        self.response_display.setFont(QFont("Consolas", 9))
+        self.response_display.setPlaceholderText("Odpowiedź ACK/NAK pojawi się tutaj…")
+        self.response_display.setStyleSheet(
+            "QTextEdit { background: #0e0e16; border: 1px solid #2a2a3a; border-radius: 3px; "
+            "color: #99bbcc; padding: 4px 6px; }"
+        )
+        self.response_display.setVisible(False)
+
+        send_layout.addWidget(send_header)
+        send_layout.addLayout(send_row)
+        send_layout.addWidget(self.response_display)
+        send_frame.setVisible(False)
 
         input_layout.addWidget(paste_label)
         input_layout.addWidget(self.paste_input)
         input_layout.addWidget(self.tiles_scroll)
         input_layout.addLayout(btn_row)
+        input_layout.addWidget(send_frame)
         layout.addWidget(input_frame)
 
         # ── Main splitter ────────────────────────────────────────────────────
@@ -253,8 +492,16 @@ class MainWindow(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setFont(QFont("Consolas", 10))
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.tree.setStyleSheet("QTreeWidget { border: none; } QTreeWidget::item { padding: 2px 0; }")
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self.tree.setColumnWidth(1, 600)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.tree.header().setStretchLastSection(True)
+        self.tree.setStyleSheet(
+            "QTreeWidget { border: none; } QTreeWidget::item { padding: 2px 0; }"
+            "QScrollBar:horizontal { background: #1a1a22; height: 8px; border: none; }"
+            "QScrollBar::handle:horizontal { background: #3a3a5a; border-radius: 4px; min-width: 20px; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        )
 
         # Table
         self.table = QTableWidget()
@@ -263,14 +510,23 @@ class MainWindow(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         self.table.setColumnWidth(2, 220)
+        self.table.setColumnWidth(3, 600)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setFont(QFont("Consolas", 10))
         self.table.verticalHeader().setDefaultSectionSize(24)
-        self.table.setStyleSheet("QTableWidget { border: none; }")
+        self.table.setStyleSheet(
+            "QTableWidget { border: none; }"
+            "QScrollBar:horizontal { background: #1a1a22; height: 8px; border: none; }"
+            "QScrollBar::handle:horizontal { background: #3a3a5a; border-radius: 4px; min-width: 20px; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        )
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_context_menu)
 
@@ -303,6 +559,8 @@ class MainWindow(QWidget):
         self.parse_btn.clicked.connect(self._parse)
         self.copy_frame_btn.clicked.connect(self._copy_frame)
         self.clear_btn.clicked.connect(self._clear)
+        self.mllp_toggle_btn.clicked.connect(self._toggle_mllp_panel)
+        self.send_btn.clicked.connect(self._send_mllp)
         self.tree.itemClicked.connect(self._on_tree_click)
         self.table.itemSelectionChanged.connect(self._on_table_select)
 
@@ -405,7 +663,9 @@ class MainWindow(QWidget):
         self.paste_input.blockSignals(False)
         self._last_paste_len = 0
         self.tree.clear()
+        self.tree.header().setStretchLastSection(True)
         self.table.setRowCount(0)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self._set_status("")
         self.legend_label.setText("Kliknij segment lub pole, aby zobaczyć opis.")
         self._current_message = None
@@ -446,6 +706,13 @@ class MainWindow(QWidget):
                             field_item.addChild(rep_item)
 
             seg_item.setExpanded(True)
+
+        # If content is wider than viewport, disable stretch so scroll works
+        self.tree.header().setStretchLastSection(False)
+        self.tree.resizeColumnToContents(1)
+        remaining = self.tree.viewport().width() - self.tree.columnWidth(0)
+        if self.tree.columnWidth(1) <= remaining:
+            self.tree.header().setStretchLastSection(True)
 
     def _make_seg_tree_item(self, seg, color: str) -> QTreeWidgetItem:
         seg_name_full = fields.get_segment_name(seg.name)
@@ -503,6 +770,14 @@ class MainWindow(QWidget):
                 it.setForeground(QBrush(QColor("#dcdcdc")))
                 it.setData(Qt.ItemDataRole.UserRole, (seg_name, field_num))
                 self.table.setItem(row_idx, col, it)
+
+        # If content is wider than viewport, disable stretch so scroll works
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.resizeColumnToContents(3)
+        used = sum(self.table.columnWidth(c) for c in range(3))
+        remaining = self.table.viewport().width() - used
+        if self.table.columnWidth(3) <= remaining:
+            self.table.horizontalHeader().setStretchLastSection(True)
 
     # ──────────────────────────────────────── legend ─────────────────────────
 
@@ -564,6 +839,57 @@ class MainWindow(QWidget):
             self.legend_label.setText(
                 f'{tag}&nbsp;&nbsp;<span style="color:#888;">Brak opisu dla tego pola.</span>'
             )
+
+    # ──────────────────────────────────────── MLLP send ────────────────────
+
+    def _toggle_mllp_panel(self):
+        visible = not self.send_frame.isVisible()
+        self.send_frame.setVisible(visible)
+        self.mllp_toggle_btn.setIcon(_icon("mllp_d") if visible else _icon("mllp_r"))
+
+    def _send_mllp(self):
+        raw = self._get_assembled_raw().strip()
+        if not raw:
+            self._set_send_status("Brak ramki do wysłania.", error=True)
+            return
+
+        host = self.host_input.text().strip()
+        if not host:
+            self._set_send_status("Podaj adres hosta.", error=True)
+            return
+
+        port = self.port_input.value()
+        timeout = self.timeout_input.value()
+
+        self.send_btn.setEnabled(False)
+        self._set_send_status("Wysyłanie…")
+        self.response_display.clear()
+        self.response_display.setVisible(False)
+
+        self._mllp_worker = _MLLPWorker(host, port, raw, timeout)
+        self._mllp_worker.finished.connect(self._on_mllp_result)
+        self._mllp_worker.start()
+
+    def _on_mllp_result(self, result: mllp_sender.MLLPResponse):
+        self.send_btn.setEnabled(True)
+        self._mllp_worker = None
+
+        if result.success:
+            ack_info = f" [ACK: {result.ack_code}]" if result.ack_code else ""
+            self._set_send_status(f"Wysłano pomyślnie.{ack_info}")
+        else:
+            self._set_send_status(f"Błąd: {result.ack_code or 'wysyłka nieudana'}", error=True)
+
+        # Show response content
+        if result.raw_response:
+            self.response_display.setVisible(True)
+            formatted = result.raw_response.replace('\r', '\n')
+            self.response_display.setPlainText(formatted)
+
+    def _set_send_status(self, text: str, error: bool = False):
+        color = "#e05555" if error else "#55cc77"
+        self.send_status.setTextFormat(Qt.TextFormat.RichText)
+        self.send_status.setText(f'<span style="color:{color};">{text}</span>')
 
     # ──────────────────────────────────────── helpers ────────────────────────
 
