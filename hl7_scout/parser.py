@@ -15,19 +15,49 @@ _KNOWN_SEGMENTS = {
     'TXA', 'TCD', 'SID', 'IPC', 'BPO', 'BPX', 'BTX',
 }
 
+_SEGMENT_NAMES_PATTERN = (
+    '|'.join(re.escape(s) for s in sorted(_KNOWN_SEGMENTS, key=len, reverse=True))
+    + r'|Z[A-Z0-9]{2}'   # also match Z-segments (ZPI, ZAL, ZPM, etc.)
+)
+
+# Primary: segment name at start of string or preceded by non-alpha char
 _FALLBACK_RE = re.compile(
-    r'(?<![A-Z])(?:'      # must NOT be preceded by an uppercase letter
-    + '|'.join(re.escape(s) for s in sorted(_KNOWN_SEGMENTS, key=len, reverse=True))
-    + r'|Z[A-Z0-9]{2})'   # also match Z-segments (ZPI, ZAL, ZPM, etc.)
-    + r'\|'
+    r'(?:^|(?<=[^A-Za-z]))(?:' + _SEGMENT_NAMES_PATTERN + r')\|'
+)
+
+# Secondary: for fully concatenated frames where segments follow directly
+# after a pipe (e.g. ...value|PID|...), detect segment name right after |
+_FALLBACK_AFTER_PIPE_RE = re.compile(
+    r'\|(?=' + '(?:' + _SEGMENT_NAMES_PATTERN + r')\|)'
 )
 
 
 def _fallback_split(line: str) -> list:
     """Split a single-line HL7 message by detecting known segment boundaries."""
+    # First try primary regex
     matches = list(_FALLBACK_RE.finditer(line))
+
     if len(matches) <= 1:
+        # Try splitting on pipe-before-segment pattern for fully concatenated frames
+        # e.g. "...value|PID|..." -> split at | before PID
+        split_points = [m.start() for m in _FALLBACK_AFTER_PIPE_RE.finditer(line)]
+        if split_points:
+            # Also include start if it begins with a segment
+            parts = []
+            prev = 0
+            for sp in split_points:
+                chunk = line[prev:sp].strip()
+                if chunk:
+                    parts.append(chunk)
+                prev = sp + 1  # skip the pipe that separates segments
+            # Last chunk
+            chunk = line[prev:].strip()
+            if chunk:
+                parts.append(chunk)
+            if len(parts) > 1:
+                return parts
         return [line]
+
     parts = []
     for i, m in enumerate(matches):
         start = m.start()
@@ -68,8 +98,37 @@ class HL7Message:
     subcomponent_sep: str = '&'
 
 
+_PCT_BREAK_RE = re.compile(r'%0[dDaA]')
+
+
+def url_decode(text: str) -> str:
+    """A message copied from AMMS (WYMD_PACZKA.TRESC) is URL-encoded:
+    ``%0D`` between the segments, ``%C5%82`` for "ł" — it parsed as one long
+    MSH segment (2026-11-19).  Decoded only when it carries an encoded
+    segment break, so a plain message with "%" in a value stays as it is."""
+    if not _PCT_BREAK_RE.search(text):
+        return text
+    from urllib.parse import unquote_to_bytes
+    raw = unquote_to_bytes(text)
+    for enc in ('utf-8', 'cp1250'):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('latin-1')
+
+
 def parse(raw: str) -> HL7Message:
-    text = raw.strip()
+    text = url_decode(raw.strip())
+
+    # Normalize all possible segment terminators to \n:
+    # \r\n (Windows), \r (HL7 standard CR), \n (Unix),
+    # \x0b (VT), \x0c (FF), \x1c (HL7 end-of-block),
+    # \u0085 (NEL), \u2028 (line sep), \u2029 (paragraph sep)
+    # Replace literal escape sequences (\r, \n, \x0d, \x0a) that appear
+    # when copying from databases or logs as visible text
+    text = text.replace('\\r\\n', '\n').replace('\\r', '\n').replace('\\n', '\n')
+    text = text.replace('\\x0d\\x0a', '\n').replace('\\x0d', '\n').replace('\\x0a', '\n')
 
     # Normalize all possible segment terminators to \n:
     # \r\n (Windows), \r (HL7 standard CR), \n (Unix),
@@ -78,10 +137,16 @@ def parse(raw: str) -> HL7Message:
     text = re.sub(r'\r\n|\r|\n|\x0b|\x0c|\x1c|\u0085|\u2028|\u2029', '\n', text)
     lines = [l.strip() for l in text.split('\n') if l.strip()]
 
-    # Fallback: if only 1 line came through (e.g. \r was silently stripped by Qt),
-    # try to split on known HL7 segment boundaries using a whitelist.
-    if len(lines) == 1 and '|' in lines[0]:
-        lines = _fallback_split(lines[0]) or lines
+    # Fallback: if any line contains multiple segments concatenated
+    # (e.g. copied from DB as a single string), split on known segment boundaries.
+    expanded = []
+    for line in lines:
+        if '|' in line:
+            parts = _fallback_split(line)
+            expanded.extend(parts)
+        else:
+            expanded.append(line)
+    lines = expanded
 
     msg = HL7Message(segments=[])
 
